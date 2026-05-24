@@ -7,6 +7,7 @@ import difflib
 import pandas as pd
 from bs4 import BeautifulSoup
 import numpy as np
+import concurrent.futures
 
 KOR_TICKER_MAP = {
     "애플 (Apple)": "AAPL", "엔비디아 (NVIDIA)": "NVDA", "테슬라 (Tesla)": "TSLA",
@@ -135,7 +136,6 @@ def generate_sparkline(hist, color='green'):
         return None
 
 def get_money_flow(code: str):
-    """네이버 증권을 크롤링하여 최근 영업일의 외인/기관 순매수 수량을 가져옵니다."""
     try:
         url = f"https://finance.naver.com/item/frgn.naver?code={code}"
         res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
@@ -154,10 +154,6 @@ def get_money_flow(code: str):
     return {"inst": "제공 안됨", "foreign": "제공 안됨"}
 
 def ai_pattern_analysis(hist, current_price):
-    """
-    주가 패턴(RSI, 이동평균, 볼린저 밴드, 거래량 변동)을 복합적으로 분석(학습 시뮬레이션)하여
-    매수/매도 타이밍 가이드라인과 시그널을 생성합니다.
-    """
     signal_icon = "➖"
     trading_signal = "보유 / 관망 대기"
     guideline = "현재 특별한 패턴이 감지되지 않았습니다. 박스권 횡보 가능성이 높으니 지지선을 확인하세요."
@@ -166,7 +162,6 @@ def ai_pattern_analysis(hist, current_price):
     if hist.empty or len(hist) < 20:
         return trading_signal, signal_icon, guideline, score_adj
 
-    # 1. RSI 계산
     delta = hist['Close'].diff()
     gain = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
@@ -174,7 +169,6 @@ def ai_pattern_analysis(hist, current_price):
     rsi = 100 - (100 / (1 + rs))
     current_rsi = rsi.iloc[-1]
 
-    # 2. 볼린저 밴드 (20일 기준)
     ma20 = hist['Close'].rolling(window=20).mean()
     std20 = hist['Close'].rolling(window=20).std()
     upper_band = ma20 + (std20 * 2)
@@ -182,12 +176,10 @@ def ai_pattern_analysis(hist, current_price):
     curr_upper = upper_band.iloc[-1]
     curr_lower = lower_band.iloc[-1]
     
-    # 3. 거래량 패턴 (최근 3일 vs 20일 평균)
     vol20 = hist['Volume'].rolling(window=20).mean().iloc[-1]
     vol3 = hist['Volume'].tail(3).mean()
     vol_surge = vol3 > vol20 * 1.5
 
-    # AI 패턴 매칭 룰 기반 추론
     if current_rsi < 30 and current_price <= curr_lower:
         trading_signal = "강력 매수 (기술적 과매도 + 밴드 하단 이탈)"
         signal_icon = "🟢"
@@ -214,7 +206,6 @@ def ai_pattern_analysis(hist, current_price):
         guideline = f"AI 패턴 분석 결과: 생명선인 20일선을 하향 이탈했습니다. 하락 파동이 시작될 수 있으므로 바닥이 확인될 때까지 신규 매수는 보류하는 것이 좋습니다."
         score_adj -= 10
     else:
-        # 중립 구간
         trading_signal = "보유 / 관망 (방향성 탐색 구간)"
         signal_icon = "➖"
         guideline = f"AI 패턴 분석 결과: 현재 뚜렷한 수급이나 기술적 지표 이탈이 없는 박스권 횡보 상태입니다. 위아래로 방향성이 결정될 때까지 관망하세요. (현재 RSI: {current_rsi:.1f})"
@@ -251,18 +242,14 @@ def get_stock_info(final_ticker: str, kor_name: str = None):
             if currency == "KRW": chart_color = 'red' if hist['Close'].iloc[-1] > hist['Close'].iloc[0] else 'blue'
             chart_buf = generate_sparkline(hist, chart_color)
             
-        # 외인 / 기관 수급 정보 (한국 주식 전용)
         money_flow = {"inst": "-", "foreign": "-"}
         if is_korean:
             code = final_ticker.replace('.KS', '').replace('.KQ', '')
             money_flow = get_money_flow(code)
 
-        # AI 패턴 분석 학습 시뮬레이터 (매수/매도 타이밍 도출)
         trading_signal, signal_icon, ai_guideline, pattern_score = ai_pattern_analysis(hist, current_price)
 
-        # 퀀트 점수 산출
-        score = 40 + pattern_score # 기본 40점
-        
+        score = 40 + pattern_score
         rec = info.get('recommendationKey', 'none')
         if rec == 'strong_buy': score += 20
         elif rec == 'buy': score += 10
@@ -280,7 +267,6 @@ def get_stock_info(final_ticker: str, kor_name: str = None):
             
         score = max(0, min(100, score))
         
-        # 관련 수혜주 (티커 -> 기업명 변환 로직)
         related_tickers_names = []
         try:
             rec_url = f"https://query2.finance.yahoo.com/v6/finance/recommendationsbysymbol/{final_ticker}"
@@ -319,3 +305,83 @@ def get_stock_info(final_ticker: str, kor_name: str = None):
     except Exception as e:
         print(f"Error fetching detail: {e}")
         return None
+
+# --- AI 종목 추천 엔진 ---
+def analyze_single_candidate(cand):
+    """병렬 처리용 단일 종목 분석 함수"""
+    sym = cand['symbol']
+    try:
+        ticker = yf.Ticker(sym)
+        hist = ticker.history(period="3mo")
+        if hist.empty: return None
+        
+        curr_price = hist['Close'].iloc[-1]
+        signal, icon, guide, score_adj = ai_pattern_analysis(hist, curr_price)
+        
+        # 매수/상승 패턴이 감지된 종목만 필터링
+        if score_adj > 0 or "매수" in signal:
+            info = ticker.info
+            sector = info.get('sector', '업종/섹터 정보 없음')
+            industry = info.get('industry', '')
+            
+            # 간단한 스코어 산출 (기본 + 패턴점수)
+            base_score = 60 + score_adj
+            
+            return {
+                "name": cand['name'],
+                "symbol": sym.replace('.KS', '').replace('.KQ', ''),
+                "price": curr_price,
+                "signal": signal,
+                "icon": icon,
+                "reason": guide,
+                "sector": f"{sector} / {industry}",
+                "score": base_score
+            }
+    except: pass
+    return None
+
+def get_recommended_stocks(market: str):
+    """지정된 시장의 거래량/시총 상위 종목을 추출하여 AI 알고리즘으로 분석 후 추천"""
+    candidates = []
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        if market == "KOSPI":
+            url = "https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=quant&sosok=0&pageSize=40&page=1"
+            res = requests.get(url, headers=headers, timeout=5).json()
+            for item in res.get('result', {}).get('itemList', []):
+                # ETF 제외
+                if 'KODEX' not in item['nm'] and 'TIGER' not in item['nm'] and 'KBSTAR' not in item['nm']:
+                    candidates.append({"symbol": f"{item['cd']}.KS", "name": item['nm']})
+                    
+        elif market == "KOSDAQ":
+            url = "https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=quant&sosok=1&pageSize=40&page=1"
+            res = requests.get(url, headers=headers, timeout=5).json()
+            for item in res.get('result', {}).get('itemList', []):
+                if 'KODEX' not in item['nm'] and 'TIGER' not in item['nm']:
+                    candidates.append({"symbol": f"{item['cd']}.KQ", "name": item['nm']})
+                    
+        elif market in ["NASDAQ", "US"]:
+            # US 3대 지수 편입 및 거래량 상위
+            url = "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved?formatted=false&scrIds=day_gainers&count=40"
+            res = requests.get(url, headers=headers, timeout=5).json()
+            quotes = res.get('finance', {}).get('result', [{}])[0].get('quotes', [])
+            for q in quotes:
+                sym = q['symbol']
+                if "^" not in sym and "." not in sym and "=" not in sym and "-" not in sym:
+                    candidates.append({"symbol": sym, "name": q.get('shortName', sym)})
+    except Exception as e:
+        print(f"Candidate Fetch Error: {e}")
+
+    recommended = []
+    # ThreadPoolExecutor를 이용하여 40개 종목을 빠르게 동시 분석
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_cand = {executor.submit(analyze_single_candidate, cand): cand for cand in candidates}
+        for future in concurrent.futures.as_completed(future_to_cand):
+            res = future.result()
+            if res:
+                recommended.append(res)
+    
+    # 점수 높은 순으로 정렬 후 상위 10개 반환
+    recommended.sort(key=lambda x: x['score'], reverse=True)
+    return recommended[:10]

@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from utils.fetcher import get_stock_info, search_stock
+from utils.fetcher import get_stock_info, search_stock, get_recommended_stocks
 from typing import List
 
 class Stock(commands.Cog):
@@ -45,7 +45,6 @@ class Stock(commands.Cog):
                 inline=False
             )
 
-            # 한국 주식일 경우에만 외인/기관 수급 데이터 표시
             if info['is_korean']:
                 inst_flow = info['money_flow']['inst']
                 for_flow = info['money_flow']['foreign']
@@ -61,7 +60,6 @@ class Stock(commands.Cog):
                 inline=False
             )
 
-            # AI 타이밍 및 가이드라인
             embed.add_field(
                 name=f"[ {info['signal_icon']} AI 기술적 분석 & 매매 타이밍 ]", 
                 value=f"> **AI 시그널**: **{info['trading_signal']}**\n"
@@ -69,7 +67,6 @@ class Stock(commands.Cog):
                 inline=False
             )
 
-            # 종합 점수 및 밸류체인
             embed.add_field(
                 name="[ 🎯 퀀트 가치평가 및 수혜주 ]", 
                 value=f"> **종합 투자 점수**: **{info['score']}점** / 100점\n"
@@ -90,14 +87,58 @@ class Stock(commands.Cog):
 
     @get_price.autocomplete('keyword')
     async def keyword_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
-        if not current:
-            return []
+        if not current: return []
         results = search_stock(current)
         choices = []
         for r in results:
             display_name = f"{r['name']} ({r['display_symbol']})"
             choices.append(app_commands.Choice(name=display_name, value=r['symbol']))
         return choices[:25]
+
+    # --- 종목 추천 명령어 ---
+    @app_commands.command(name="종목추천", description="AI 알고리즘이 매수하기 좋은 유망 종목을 선별하여 추천합니다.")
+    @app_commands.describe(market="분석할 시장을 선택하세요")
+    @app_commands.choices(market=[
+        app_commands.Choice(name="코스피 (KOSPI)", value="KOSPI"),
+        app_commands.Choice(name="코스닥 (KOSDAQ)", value="KOSDAQ"),
+        app_commands.Choice(name="나스닥/미국주식 (US)", value="US")
+    ])
+    async def recommend(self, interaction: discord.Interaction, market: app_commands.Choice[str]):
+        # 이 작업은 데이터를 병렬로 긁어오므로 시간이 걸립니다.
+        await interaction.response.defer(thinking=True)
+        
+        market_val = market.value
+        market_name = market.name
+        curr = "USD" if market_val == "US" else "KRW"
+        
+        recommended_list = get_recommended_stocks(market_val)
+        
+        if not recommended_list:
+            return await interaction.followup.send(f"❌ 현재 {market_name} 시장에서 확실한 매수 시그널이 감지된 종목이 없습니다. (장이 너무 안 좋거나 데이터 오류일 수 있습니다)")
+            
+        embed = discord.Embed(
+            title=f"🤖 {market_name} - AI 추천 매수 유망 종목 Top {len(recommended_list)}",
+            description="현재 거래량이 폭발하거나 기술적(RSI/볼린저)으로 강력한 매수 패턴을 그리는 종목들입니다.",
+            color=0x00ff00
+        )
+        
+        for idx, rec in enumerate(recommended_list, 1):
+            price_str = self.format_price(rec['price'], curr)
+            # 가시성을 위해 yaml 코드블록과 인라인 필드를 조합합니다.
+            field_value = (
+                f"**섹터/업종**: `{rec['sector']}`\n"
+                f"**현재가**: `{price_str} {curr}`\n"
+                f"> {rec['icon']} **{rec['signal']}**\n"
+                f"> {rec['reason']}"
+            )
+            embed.add_field(
+                name=f"{idx}. {rec['name']} ({rec['symbol']})",
+                value=field_value,
+                inline=False
+            )
+            
+        embed.set_footer(text="※ 추천 종목은 기술적 지표 시뮬레이션의 결과이므로 반드시 본인의 판단하에 투자하시기 바랍니다.")
+        await interaction.followup.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(Stock(bot))
