@@ -8,23 +8,19 @@ class Stock(commands.Cog):
         self.bot = bot
 
     def format_price(self, price, currency):
-        if price is None: return "정보 없음"
+        if price is None: return "-"
         if currency == "USD": return f"{price:,.2f}"
         return f"{int(price):,}"
 
-    @app_commands.command(name="주가", description="종목명이나 종목코드로 주가 상세 정보와 분석 점수를 확인합니다.")
-    @app_commands.describe(keyword="종목명(예: 삼성전자, 애플) 또는 티커")
+    @app_commands.command(name="주가", description="종목 상세 분석 (차트, 52주 변동, 자본 흐름, 수혜주 포함)")
+    @app_commands.describe(keyword="종목명(삼성전자, 애플) 또는 티커")
     async def get_price(self, interaction: discord.Interaction, keyword: str):
         await interaction.response.defer(thinking=True)
-        
         search_results = search_stock(keyword)
-        
         if not search_results:
-            await interaction.followup.send(f"❌ '{keyword}' 검색 결과를 찾을 수 없습니다.")
-            return
+            return await interaction.followup.send(f"❌ '{keyword}' 검색 결과를 찾을 수 없습니다.")
             
         best_match = search_results[0]
-        # 네이버에서 찾은 한국어 기업명을 get_stock_info로 넘겨줍니다.
         info = get_stock_info(best_match['symbol'], best_match['name'])
         
         if info:
@@ -34,36 +30,45 @@ class Stock(commands.Cog):
             prev_str = self.format_price(info['prev_close'], curr)
             high_str = self.format_price(info['high_52w'], curr)
             low_str = self.format_price(info['low_52w'], curr)
-                
-            embed_color = discord.Color.green() if info['score'] >= 50 else discord.Color.red()
+            growth_str = f"+{info['growth_52w']:.1f}%" if info['growth_52w'] > 0 else f"{info['growth_52w']:.1f}%"
             
             embed = discord.Embed(
-                title=f"{info['icon']} {info['name']} ({info['ticker']})",
-                description=f"**{info['exchange']}** 상장",
-                color=embed_color
+                title=f"{info['icon']} {info['name']} ({info['ticker']}) - {info['exchange']}",
+                color=0x2b2d31 # 디스코드 다크모드 배경과 어울리는 세련된 색상
             )
             
-            # 첫 번째 줄: 현재가, 전일비(시가/종가)
-            embed.add_field(name="💵 현재가", value=f"**`{price_str} {curr}`**", inline=True)
-            embed.add_field(name="📉 전일 종가", value=f"{prev_str} {curr}", inline=True)
-            embed.add_field(name="📈 금일 시가", value=f"{open_str} {curr}", inline=True)
+            # --- 1단: 금액적 정보 (우측 배열 느낌을 주기 위해 Inline 적극 활용) ---
+            embed.add_field(name="💰 현재가", value=f"**`{price_str} {curr}`**", inline=True)
+            embed.add_field(name="시가", value=f"{open_str} {curr}", inline=True)
+            embed.add_field(name="전일 종가", value=f"{prev_str} {curr}", inline=True)
             
-            # 두 번째 줄: 52주 변동폭 및 섹터
-            embed.add_field(name="📊 52주 최저 / 최고가", value=f"{low_str} ~ {high_str}", inline=True)
-            embed.add_field(name="🏢 섹터 / 업종", value=f"{info['sector']} / {info['industry']}", inline=True)
+            embed.add_field(name="📊 52주 최저~최고", value=f"{low_str} ~ {high_str} {curr}", inline=True)
+            embed.add_field(name="🚀 52주 저점 대비 성장", value=f"**{growth_str}**", inline=True)
+            embed.add_field(name="📈 동종 업계 상대지표", value=f"*{info['relative_strength']}*", inline=True)
+
+            # --- 2단: 투자 점수 및 가치 사슬 (하단 배치) ---
+            embed.add_field(
+                name="🤖 AI 퀀트 종합 투자 점수", 
+                value=f"**{info['score']}점** / 100점\n*(자본 수급, 기관 매수세, 애널리스트 미래가치 평가 종합)*", 
+                inline=False
+            )
+            embed.add_field(
+                name="🔗 관련 수혜주 / 밸류체인", 
+                value=f"`{info['related_tickers']}`\n*(해당 종목과 동조화되거나 자금이 같이 움직이는 종목들)*", 
+                inline=False
+            )
             
-            # 세 번째 줄: 투자 분석 점수
-            embed.add_field(name="🤖 AI 상대적 투자 점수", value=f"**{info['score']}점** / 100점", inline=False)
-            
-            if len(search_results) > 1:
-                other_matches = [f"{r['name']}({r['display_symbol']})" for r in search_results[1:5]]
-                embed.add_field(name="🔍 연관 검색어", value=", ".join(other_matches), inline=False)
-            
-            embed.set_footer(text="※ 점수는 PER 상대평가, 이동평균선(50일, 200일) 모멘텀, 애널리스트 목표가를 종합한 봇의 참고용 평가 지표입니다. 공모가는 지원하지 않아 52주 변동폭을 제공합니다.")
-            
-            await interaction.followup.send(embed=embed)
+            embed.set_footer(text="※ 차트는 최근 3개월 추세입니다. 점수는 거래량 폭발(자본유입), 모멘텀, 가치평가를 기반으로 합니다.")
+
+            # 차트 이미지가 생성되었다면 디스코드 파일로 변환하여 Embed에 첨부
+            if info.get('chart_buf'):
+                file = discord.File(info['chart_buf'], filename="chart.png")
+                embed.set_image(url="attachment://chart.png")
+                await interaction.followup.send(file=file, embed=embed)
+            else:
+                await interaction.followup.send(embed=embed)
         else:
-            await interaction.followup.send("❌ 가장 비슷한 종목을 찾았으나, 상장폐지되었거나 상세 데이터를 불러오는데 실패했습니다.")
+            await interaction.followup.send("❌ 상세 데이터를 불러오는데 실패했습니다.")
 
 async def setup(bot):
     await bot.add_cog(Stock(bot))
