@@ -4,6 +4,12 @@ from discord import app_commands
 from utils.fetcher import get_stock_info, search_stock, get_recommended_stocks
 from typing import List
 
+MARKET_ALIASES = {
+    "KOSPI": ["코스피", "ㅋㅅㅍ", "kospi", "코스피 (KOSPI)"],
+    "KOSDAQ": ["코스닥", "ㅋㅅㄷ", "kosdaq", "코스닥 (KOSDAQ)"],
+    "US": ["나스닥", "미국", "미국주식", "미장", "ㄴㅅㄷ", "ㅁㅈ", "us", "nasdaq", "나스닥/미국주식 (US)"]
+}
+
 class Stock(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -96,19 +102,23 @@ class Stock(commands.Cog):
         return choices[:25]
 
     # --- 종목 추천 명령어 ---
-    @app_commands.command(name="종목추천", description="AI 알고리즘이 매수하기 좋은 유망 종목을 선별하여 추천합니다.")
-    @app_commands.describe(market="분석할 시장을 선택하세요")
-    @app_commands.choices(market=[
-        app_commands.Choice(name="코스피 (KOSPI)", value="KOSPI"),
-        app_commands.Choice(name="코스닥 (KOSDAQ)", value="KOSDAQ"),
-        app_commands.Choice(name="나스닥/미국주식 (US)", value="US")
-    ])
-    async def recommend(self, interaction: discord.Interaction, market: app_commands.Choice[str]):
-        # 이 작업은 데이터를 병렬로 긁어오므로 시간이 걸립니다.
+    @app_commands.command(name="추천", description="AI 알고리즘이 매수하기 좋은 유망 종목을 추천합니다.")
+    @app_commands.describe(market="검색할 장종류 (코스피/ㅋㅅㅍ, 코스닥/ㅋㅅㄷ, 나스닥/ㄴㅅㄷ 등)")
+    async def recommend(self, interaction: discord.Interaction, market: str):
         await interaction.response.defer(thinking=True)
         
-        market_val = market.value
-        market_name = market.name
+        # 초성 및 줄임말 매핑 로직
+        market_val = None
+        market_lower = market.lower().replace(" ", "")
+        for std, aliases in MARKET_ALIASES.items():
+            if market_lower == std.lower() or market_lower in aliases:
+                market_val = std
+                break
+                
+        if not market_val:
+            return await interaction.followup.send(f"❌ '{market}'은(는) 알 수 없는 장 종류입니다. 코스피(ㅋㅅㅍ), 코스닥(ㅋㅅㄷ), 나스닥(ㄴㅅㄷ) 중에서 입력해주세요.")
+            
+        market_name = {"KOSPI": "코스피", "KOSDAQ": "코스닥", "US": "나스닥/미국주식"}[market_val]
         curr = "USD" if market_val == "US" else "KRW"
         
         recommended_list = get_recommended_stocks(market_val)
@@ -124,7 +134,6 @@ class Stock(commands.Cog):
         
         for idx, rec in enumerate(recommended_list, 1):
             price_str = self.format_price(rec['price'], curr)
-            # 가시성을 위해 yaml 코드블록과 인라인 필드를 조합합니다.
             field_value = (
                 f"**섹터/업종**: `{rec['sector']}`\n"
                 f"**현재가**: `{price_str} {curr}`\n"
@@ -139,6 +148,27 @@ class Stock(commands.Cog):
             
         embed.set_footer(text="※ 추천 종목은 기술적 지표 시뮬레이션의 결과이므로 반드시 본인의 판단하에 투자하시기 바랍니다.")
         await interaction.followup.send(embed=embed)
+
+    @recommend.autocomplete('market')
+    async def recommend_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+        choices = [
+            app_commands.Choice(name="코스피 (KOSPI)", value="KOSPI"),
+            app_commands.Choice(name="코스닥 (KOSDAQ)", value="KOSDAQ"),
+            app_commands.Choice(name="나스닥/미국주식 (US)", value="US")
+        ]
+        if not current:
+            return choices
+            
+        current_lower = current.lower()
+        filtered = []
+        for choice in choices:
+            val = choice.value
+            aliases = MARKET_ALIASES[val]
+            if any(current_lower in alias for alias in aliases):
+                filtered.append(choice)
+                
+        # 매칭되는게 없으면 전체 리스트를 보여줌
+        return filtered if filtered else choices
 
 async def setup(bot):
     await bot.add_cog(Stock(bot))
