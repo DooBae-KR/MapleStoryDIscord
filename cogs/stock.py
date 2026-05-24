@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from utils.fetcher import get_stock_info, search_stock, get_recommended_stocks
-from utils.db import toggle_favorite, get_favorites
+from utils.db import toggle_favorite, get_favorites, get_favorite_count
 import asyncio
 from typing import List
 
@@ -13,25 +13,33 @@ MARKET_ALIASES = {
 }
 
 class FavoriteButton(discord.ui.Button):
-    def __init__(self, ticker: str, name: str):
-        super().__init__(style=discord.ButtonStyle.secondary, label="즐겨찾기", emoji="👍")
+    def __init__(self, ticker: str, name: str, current_count: int):
+        # 라벨을 빈 문자열로, 이모지를 하트(❤️)로 변경
+        super().__init__(style=discord.ButtonStyle.secondary, label=f" {current_count}", emoji="❤️")
         self.ticker = ticker
         self.name = name
 
     async def callback(self, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
-        # DB에 추가 또는 제거 (토글)
         added = toggle_favorite(user_id, self.ticker, self.name)
+        new_count = get_favorite_count(self.ticker)
         
+        # 버튼 텍스트(하트 수) 업데이트
+        self.label = f" {new_count}"
         if added:
-            await interaction.response.send_message(f"👍 **{self.name}** 종목이 내 즐겨찾기에 추가되었습니다!\n(`/ㄴㅈㅁ` 명령어로 모아볼 수 있습니다)", ephemeral=True)
+            self.style = discord.ButtonStyle.danger # 눌렀을 때 빨간색
+            await interaction.response.edit_message(view=self.view)
+            await interaction.followup.send(f"❤️ **{self.name}** 종목이 내 하트 목록에 추가되었습니다!\n(`/ㅈㅁ` 명령어로 모아볼 수 있습니다)", ephemeral=True)
         else:
-            await interaction.response.send_message(f"🗑️ **{self.name}** 종목이 즐겨찾기에서 제거되었습니다.", ephemeral=True)
+            self.style = discord.ButtonStyle.secondary # 해제하면 다시 회색
+            await interaction.response.edit_message(view=self.view)
+            await interaction.followup.send(f"💔 **{self.name}** 종목이 하트 목록에서 제거되었습니다.", ephemeral=True)
 
 class StockView(discord.ui.View):
     def __init__(self, ticker: str, name: str):
         super().__init__(timeout=None)
-        self.add_item(FavoriteButton(ticker, name))
+        count = get_favorite_count(ticker)
+        self.add_item(FavoriteButton(ticker, name, count))
 
 class Stock(commands.Cog):
     def __init__(self, bot):
@@ -103,9 +111,10 @@ class Stock(commands.Cog):
                 inline=False
             )
             
-            embed.set_footer(text="※ 아래 👍버튼을 누르면 내 즐겨찾기에 추가되어 /ㄴㅈㅁ 로 확인할 수 있습니다.")
+            # DB 조회해서 전체 하트 개수 가져오기
+            fav_count = get_favorite_count(best_match['symbol'])
+            embed.set_footer(text=f"※ 현재 총 {fav_count}명이 이 종목에 하트(❤️)를 눌렀습니다! 버튼을 눌러 내 종목(/ㅈㅁ)에 추가하세요.")
 
-            # 즐겨찾기 버튼이 포함된 View 생성
             view = StockView(ticker=best_match['symbol'], name=info['name'])
 
             if info.get('chart_buf'):
@@ -191,8 +200,8 @@ class Stock(commands.Cog):
                 filtered.append(choice)
         return filtered if filtered else choices
 
-    # --- 내 종목 모아보기 명령어 ---
-    @app_commands.command(name="ㄴㅈㅁ", description="내가 즐겨찾기(👍)한 종목들의 현재 상태와 매매 전략(물타기/존버 등)을 확인합니다.")
+    # --- 내 종목 모아보기 명령어 변경 (/ㅈㅁ) ---
+    @app_commands.command(name="ㅈㅁ", description="내가 하트(❤️)를 누른 종목들의 현재 상태와 매매 전략(물타기/존버 등)을 확인합니다.")
     async def my_portfolio(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         
@@ -200,27 +209,25 @@ class Stock(commands.Cog):
         favs = get_favorites(user_id)
         
         if not favs:
-            return await interaction.followup.send("❌ 아직 즐겨찾기한 종목이 없습니다. `/주가` 검색 후 하단의 👍 버튼을 눌러 추가해보세요!")
+            return await interaction.followup.send("❌ 아직 하트를 누른 종목이 없습니다. `/주가` 검색 후 하단에 있는 ❤️ 버튼을 눌러 추가해보세요!")
             
         embed = discord.Embed(
-            title=f"📁 {interaction.user.display_name}님의 관심 종목 포트폴리오",
+            title=f"❤️ {interaction.user.display_name}님의 관심 종목 포트폴리오",
             description=f"총 {len(favs)}개의 종목을 AI가 일괄 분석했습니다.",
-            color=0xffd700
+            color=0xff69b4 # 핫핑크색
         )
         
-        # 디스코드 타임아웃을 피하기 위해 asyncio를 사용하여 병렬로 데이터 수집
         async def fetch_fav(fav):
             loop = asyncio.get_event_loop()
             info = await loop.run_in_executor(None, get_stock_info, fav['ticker'], fav['name'])
             return info
 
-        tasks = [fetch_fav(f) for f in favs[:10]] # 최대 10개 제한 (응답속도 및 봇 부하 방지)
+        tasks = [fetch_fav(f) for f in favs[:10]]
         results = await asyncio.gather(*tasks)
         
         for info in results:
             if not info: continue
             
-            # AI 분석 시그널을 바탕으로 물타기/추매/존버 판단 로직
             signal = info['trading_signal']
             icon = info['signal_icon']
             
@@ -244,7 +251,7 @@ class Stock(commands.Cog):
             embed.add_field(name=f"{info['icon']} {info['name']} ({info['ticker']})", value=val_text, inline=False)
             
         if len(favs) > 10:
-            embed.set_footer(text="※ 서버 부하를 막기 위해 상위 10개 종목만 분석되었습니다. 종목 관리는 다시 /주가 검색 후 👍를 눌러 취소할 수 있습니다.")
+            embed.set_footer(text="※ 서버 부하를 막기 위해 상위 10개 종목만 분석되었습니다. 종목 관리는 다시 /주가 검색 후 ❤️를 눌러 취소할 수 있습니다.")
         else:
             embed.set_footer(text="※ 본 매매 가이드는 기술적 지표 시뮬레이션 결과이므로 투자 참고용으로만 활용하세요.")
             

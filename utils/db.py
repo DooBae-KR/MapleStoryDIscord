@@ -40,3 +40,12 @@ def get_favorites(user_id: str):
     rows = c.fetchall()
     conn.close()
     return [{"ticker": r[0], "name": r[1]} for r in rows]
+
+def get_favorite_count(ticker: str) -> int:
+    """해당 종목이 전체 유저들에게 하트를 몇 개 받았는지 반환합니다."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM favorites WHERE ticker=?", (ticker,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
