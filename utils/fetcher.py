@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import difflib
 import pandas as pd
+from bs4 import BeautifulSoup
+import numpy as np
 
 KOR_TICKER_MAP = {
     "애플 (Apple)": "AAPL", "엔비디아 (NVIDIA)": "NVDA", "테슬라 (Tesla)": "TSLA",
@@ -70,35 +72,6 @@ def fuzzy_search(keyword, limit=5):
             if len(final_results) >= limit: break
     return final_results
 
-def generate_sparkline(hist, color='green'):
-    try:
-        # 가독성을 위해 차트 크기를 약간 키움
-        plt.figure(figsize=(7, 2.5))
-        plt.plot(hist.index, hist['Close'], color=color, linewidth=2)
-        plt.fill_between(hist.index, hist['Close'].min(), hist['Close'], color=color, alpha=0.1)
-        
-        ax = plt.gca()
-        # 위, 왼쪽, 오른쪽 테두리 제거 (바닥선만 남김)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.spines['left'].set_visible(False)
-        ax.spines['bottom'].set_color('#888888')
-        
-        # Y축 숨김, X축 날짜(월.일) 표시
-        ax.get_yaxis().set_visible(False)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m.%d'))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=5))
-        plt.xticks(color='#cccccc', fontsize=10) # 디스코드 다크모드 대응 텍스트 색상
-        
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', transparent=True)
-        buf.seek(0)
-        plt.close()
-        return buf
-    except Exception as e:
-        print("Chart Error:", e)
-        return None
-
 def search_stock(keyword: str):
     fuzzy_results = fuzzy_search(keyword, limit=5)
     if len(fuzzy_results) > 0 and fuzzy_results[0]['score'] >= 1.0:
@@ -135,9 +108,123 @@ def search_stock(keyword: str):
             cleaned.append(r)
     return cleaned[:5]
 
+def generate_sparkline(hist, color='green'):
+    try:
+        plt.figure(figsize=(7, 2.5))
+        plt.plot(hist.index, hist['Close'], color=color, linewidth=2)
+        plt.fill_between(hist.index, hist['Close'].min(), hist['Close'], color=color, alpha=0.1)
+        
+        ax = plt.gca()
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_visible(False)
+        ax.spines['bottom'].set_color('#888888')
+        ax.get_yaxis().set_visible(False)
+        
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m.%d'))
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=5))
+        plt.xticks(color='#cccccc', fontsize=10)
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', transparent=True)
+        buf.seek(0)
+        plt.close()
+        return buf
+    except Exception as e:
+        print("Chart Error:", e)
+        return None
+
+def get_money_flow(code: str):
+    """네이버 증권을 크롤링하여 최근 영업일의 외인/기관 순매수 수량을 가져옵니다."""
+    try:
+        url = f"https://finance.naver.com/item/frgn.naver?code={code}"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
+        soup = BeautifulSoup(res.text, "html.parser")
+        tables = soup.find_all("table", {"class": "type2"})
+        if len(tables) > 1:
+            rows = tables[1].find_all("tr")
+            for r in rows:
+                cols = r.find_all("td", {"class": "num"})
+                if len(cols) >= 6:
+                    inst = cols[4].text.strip()
+                    foreign = cols[5].text.strip()
+                    return {"inst": inst, "foreign": foreign}
+    except Exception as e:
+        print("Money Flow Error:", e)
+    return {"inst": "제공 안됨", "foreign": "제공 안됨"}
+
+def ai_pattern_analysis(hist, current_price):
+    """
+    주가 패턴(RSI, 이동평균, 볼린저 밴드, 거래량 변동)을 복합적으로 분석(학습 시뮬레이션)하여
+    매수/매도 타이밍 가이드라인과 시그널을 생성합니다.
+    """
+    signal_icon = "➖"
+    trading_signal = "보유 / 관망 대기"
+    guideline = "현재 특별한 패턴이 감지되지 않았습니다. 박스권 횡보 가능성이 높으니 지지선을 확인하세요."
+    score_adj = 0
+
+    if hist.empty or len(hist) < 20:
+        return trading_signal, signal_icon, guideline, score_adj
+
+    # 1. RSI 계산
+    delta = hist['Close'].diff()
+    gain = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    current_rsi = rsi.iloc[-1]
+
+    # 2. 볼린저 밴드 (20일 기준)
+    ma20 = hist['Close'].rolling(window=20).mean()
+    std20 = hist['Close'].rolling(window=20).std()
+    upper_band = ma20 + (std20 * 2)
+    lower_band = ma20 - (std20 * 2)
+    curr_upper = upper_band.iloc[-1]
+    curr_lower = lower_band.iloc[-1]
+    
+    # 3. 거래량 패턴 (최근 3일 vs 20일 평균)
+    vol20 = hist['Volume'].rolling(window=20).mean().iloc[-1]
+    vol3 = hist['Volume'].tail(3).mean()
+    vol_surge = vol3 > vol20 * 1.5
+
+    # AI 패턴 매칭 룰 기반 추론
+    if current_rsi < 30 and current_price <= curr_lower:
+        trading_signal = "강력 매수 (기술적 과매도 + 밴드 하단 이탈)"
+        signal_icon = "🟢"
+        guideline = f"AI 패턴 분석 결과: 현재가는 볼린저 밴드 하단({int(curr_lower):,} 부근)을 이탈하였으며, RSI({current_rsi:.1f})가 극심한 과매도를 가리킵니다. 반발 매수세 유입이 예상되므로 분할 매수 타이밍으로 적합합니다."
+        score_adj += 15
+    elif current_rsi > 70 and current_price >= curr_upper:
+        trading_signal = "강력 매도 (과열 구간 진입 + 밴드 상단 터치)"
+        signal_icon = "🔴"
+        guideline = f"AI 패턴 분석 결과: 주가가 단기 급등하여 밴드 상단({int(curr_upper):,} 부근)을 돌파했습니다. RSI({current_rsi:.1f}) 과열로 차익 실현 매물이 쏟아질 수 있으니 비중 축소를 권장합니다."
+        score_adj -= 15
+    elif vol_surge and hist['Close'].iloc[-1] > hist['Close'].iloc[-2]:
+        trading_signal = "단기 추세 매수 (거래량 동반 상승 돌파)"
+        signal_icon = "🔥"
+        guideline = f"AI 패턴 분석 결과: 평소 대비 거래량이 폭발하며 강하게 말아 올리는 패턴이 감지되었습니다. 외인/기관 또는 세력의 단기 자본 유입 추세에 탑승해볼 만한 자리입니다."
+        score_adj += 10
+    elif current_rsi < 45 and current_price > ma20.iloc[-1]:
+        trading_signal = "눌림목 매수 (상승장 속 일시적 조정)"
+        signal_icon = "📈"
+        guideline = f"AI 패턴 분석 결과: 20일선({int(ma20.iloc[-1]):,} 부근) 지지를 받으며 조정을 거치고 있습니다. 손절 라인을 20일선으로 짧게 잡고 매수 진입하기 좋은 가성비 구간입니다."
+        score_adj += 5
+    elif current_rsi > 55 and current_price < ma20.iloc[-1]:
+        trading_signal = "관망 (데드크로스 및 추세 이탈 경고)"
+        signal_icon = "📉"
+        guideline = f"AI 패턴 분석 결과: 생명선인 20일선을 하향 이탈했습니다. 하락 파동이 시작될 수 있으므로 바닥이 확인될 때까지 신규 매수는 보류하는 것이 좋습니다."
+        score_adj -= 10
+    else:
+        # 중립 구간
+        trading_signal = "보유 / 관망 (방향성 탐색 구간)"
+        signal_icon = "➖"
+        guideline = f"AI 패턴 분석 결과: 현재 뚜렷한 수급이나 기술적 지표 이탈이 없는 박스권 횡보 상태입니다. 위아래로 방향성이 결정될 때까지 관망하세요. (현재 RSI: {current_rsi:.1f})"
+
+    return trading_signal, signal_icon, guideline, score_adj
+
 def get_stock_info(final_ticker: str, kor_name: str = None):
-    icon = "🇰🇷" if ".KS" in final_ticker or ".KQ" in final_ticker else "🇺🇸"
-    currency = "KRW" if icon == "🇰🇷" else "USD"
+    is_korean = ".KS" in final_ticker or ".KQ" in final_ticker
+    icon = "🇰🇷" if is_korean else "🇺🇸"
+    currency = "KRW" if is_korean else "USD"
     
     ticker_obj = yf.Ticker(final_ticker)
     try: current_price = ticker_obj.fast_info.last_price
@@ -158,54 +245,24 @@ def get_stock_info(final_ticker: str, kor_name: str = None):
             
         hist = ticker_obj.history(period="3mo")
         chart_buf = None
-        vol_score = 0
-        trading_signal = "관망 (추세 확인 필요)"
-        signal_icon = "⏸️"
         
         if not hist.empty:
             chart_color = 'red' if hist['Close'].iloc[-1] < hist['Close'].iloc[0] else 'green'
             if currency == "KRW": chart_color = 'red' if hist['Close'].iloc[-1] > hist['Close'].iloc[0] else 'blue'
             chart_buf = generate_sparkline(hist, chart_color)
             
-            # 수급(거래량) 분석
-            recent_vol = hist['Volume'].tail(5).mean()
-            avg_vol = hist['Volume'].mean()
-            if recent_vol > avg_vol * 1.5: vol_score = 15
-            elif recent_vol > avg_vol: vol_score = 5
+        # 외인 / 기관 수급 정보 (한국 주식 전용)
+        money_flow = {"inst": "-", "foreign": "-"}
+        if is_korean:
+            code = final_ticker.replace('.KS', '').replace('.KQ', '')
+            money_flow = get_money_flow(code)
 
-            # RSI 기반 매수/매도 타이밍 예측
-            delta = hist['Close'].diff()
-            gain = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
-            loss = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs))
-            current_rsi = rsi.iloc[-1] if not rsi.empty else 50
-            
-            ma50, ma200 = info.get('fiftyDayAverage'), info.get('twoHundredDayAverage')
-            
-            if current_rsi < 30:
-                trading_signal = "강력 매수 (RSI 과매도 구간, 단기 기술적 반등 예상)"
-                signal_icon = "🟢"
-            elif current_rsi > 70:
-                trading_signal = "분할 매도 (RSI 과매수 구간, 단기 고점 조정 주의)"
-                signal_icon = "🔴"
-            elif ma50 and ma200 and current_price > ma50 and current_price > ma200:
-                trading_signal = "매수 / 보유 (단장기 정배열 우상향 추세 진행중)"
-                signal_icon = "📈"
-            elif ma50 and ma200 and current_price < ma50 and current_price < ma200:
-                trading_signal = "관망 (이동평균선 역배열, 하락 추세 주의)"
-                signal_icon = "📉"
-            else:
-                trading_signal = "보유 / 관망 (특이 시그널 없음, 모멘텀 대기)"
-                signal_icon = "➖"
+        # AI 패턴 분석 학습 시뮬레이터 (매수/매도 타이밍 도출)
+        trading_signal, signal_icon, ai_guideline, pattern_score = ai_pattern_analysis(hist, current_price)
 
-        beta = info.get('beta', 1.0)
-        relative_strength = "시장 흐름과 유사"
-        if beta > 1.2: relative_strength = "동종 업계 대비 매우 강한 변동성 및 탄력성"
-        elif beta < 0.8: relative_strength = "동종 업계 대비 방어적이고 안정적인 흐름"
-        
         # 퀀트 점수 산출
-        score = 20 + vol_score
+        score = 40 + pattern_score # 기본 40점
+        
         rec = info.get('recommendationKey', 'none')
         if rec == 'strong_buy': score += 20
         elif rec == 'buy': score += 10
@@ -216,9 +273,6 @@ def get_stock_info(final_ticker: str, kor_name: str = None):
             upside = (target_price - current_price) / current_price
             score += min(20, int(upside * 100))
             
-        if current_price and info.get('fiftyDayAverage') and current_price > info.get('fiftyDayAverage'): score += 10
-        if current_price and info.get('twoHundredDayAverage') and current_price > info.get('twoHundredDayAverage'): score += 10
-            
         pe_ratio = info.get('trailingPE', info.get('forwardPE'))
         if pe_ratio:
             if pe_ratio < 15: score += 10
@@ -226,7 +280,7 @@ def get_stock_info(final_ticker: str, kor_name: str = None):
             
         score = max(0, min(100, score))
         
-        # 관련 수혜주 (티커 -> 기업명 변환 로직 추가)
+        # 관련 수혜주 (티커 -> 기업명 변환 로직)
         related_tickers_names = []
         try:
             rec_url = f"https://query2.finance.yahoo.com/v6/finance/recommendationsbysymbol/{final_ticker}"
@@ -236,12 +290,10 @@ def get_stock_info(final_ticker: str, kor_name: str = None):
                 for sym in r_symbols:
                     clean_sym = sym.replace('.KS', '').replace('.KQ', '')
                     resolved_name = clean_sym
-                    # 1. 내부 캐시에서 검색
                     for cache_item in ALL_STOCKS_CACHE:
                         if cache_item['code'] == clean_sym:
                             resolved_name = cache_item['name']
                             break
-                    # 2. 캐시에 없으면 (해외주식 등) 야후 API로 이름 조회 (빠르게)
                     if resolved_name == clean_sym:
                         temp_search = search_stock(clean_sym)
                         if temp_search:
@@ -257,9 +309,12 @@ def get_stock_info(final_ticker: str, kor_name: str = None):
             "currency": currency, "icon": icon, "ticker": final_ticker.replace('.KS', '').replace('.KQ', ''),
             "name": name, "sector": info.get('sector', '분류 안됨'), 
             "exchange": EXCHANGE_MAP.get(info.get('exchange', ''), info.get('exchange', '알 수 없음')),
-            "score": score, "relative_strength": relative_strength,
+            "score": score,
             "related_tickers": related_text, "chart_buf": chart_buf,
-            "trading_signal": trading_signal, "signal_icon": signal_icon
+            "trading_signal": trading_signal, "signal_icon": signal_icon,
+            "ai_guideline": ai_guideline,
+            "money_flow": money_flow,
+            "is_korean": is_korean
         }
     except Exception as e:
         print(f"Error fetching detail: {e}")

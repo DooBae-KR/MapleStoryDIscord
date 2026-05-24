@@ -13,8 +13,8 @@ class Stock(commands.Cog):
         if currency == "USD": return f"{price:,.2f}"
         return f"{int(price):,}"
 
-    @app_commands.command(name="주가", description="종목 상세 분석 (차트, 52주 변동, 매수/매도 타이밍, 수혜주 포함)")
-    @app_commands.describe(keyword="종목명(대건, lg 등) 또는 티커를 검색하세요")
+    @app_commands.command(name="주가", description="종목 분석 (AI 타이밍, 외인/기관 수급, 수혜주)")
+    @app_commands.describe(keyword="종목명(삼성전자, lg 등) 또는 티커를 검색하세요")
     async def get_price(self, interaction: discord.Interaction, keyword: str):
         await interaction.response.defer(thinking=True)
         
@@ -39,34 +39,45 @@ class Stock(commands.Cog):
                 color=0x2b2d31
             )
             
-            # --- 가독성을 높인 직사각형 블록형 데이터 배치 ---
             embed.add_field(
                 name="[ 💵 주가 및 시세 정보 ]",
                 value=f"```yaml\n현재가   : {price_str} {curr}\n시가     : {open_str} {curr}\n전일종가 : {prev_str} {curr}```",
                 inline=False
             )
 
+            # 한국 주식일 경우에만 외인/기관 수급 데이터 표시
+            if info['is_korean']:
+                inst_flow = info['money_flow']['inst']
+                for_flow = info['money_flow']['foreign']
+                embed.add_field(
+                    name="[ 💸 당일 기관 / 외국인 수급 흐름 ]",
+                    value=f"```diff\n기관 순매수 : {inst_flow} 주\n외인 순매수 : {for_flow} 주```",
+                    inline=False
+                )
+
             embed.add_field(
                 name="[ 📊 52주 변동 및 성장률 ]",
-                value=f"```yaml\n최저~최고 : {low_str} ~ {high_str} {curr}\n성장률    : {growth_str}\n동종업계  : {info['relative_strength']}```",
+                value=f"```yaml\n최저~최고 : {low_str} ~ {high_str} {curr}\n성장률    : {growth_str}```",
                 inline=False
             )
 
+            # AI 타이밍 및 가이드라인
             embed.add_field(
-                name="[ 🎯 AI 퀀트 투자 분석 및 매수/매도 타이밍 ]", 
-                value=f"> **종합 점수**: **{info['score']}점** / 100점\n"
-                      f"> {info['signal_icon']} **{info['trading_signal']}**\n"
-                      f"*(외인/기관 자본 흐름, 이동평균선 역배열/정배열, 기술적 RSI 지표 등을 종합한 분석입니다.)*", 
+                name=f"[ {info['signal_icon']} AI 기술적 분석 & 매매 타이밍 ]", 
+                value=f"> **AI 시그널**: **{info['trading_signal']}**\n"
+                      f"> {info['ai_guideline']}", 
                 inline=False
             )
 
+            # 종합 점수 및 밸류체인
             embed.add_field(
-                name="[ 🔗 관련 수혜 기업 및 밸류체인 ]", 
-                value=f"> {info['related_tickers']}", 
+                name="[ 🎯 퀀트 가치평가 및 수혜주 ]", 
+                value=f"> **종합 투자 점수**: **{info['score']}점** / 100점\n"
+                      f"> **연관 수혜주/밸류체인**: `{info['related_tickers']}`", 
                 inline=False
             )
             
-            embed.set_footer(text="※ 차트 하단에는 X축(월.일)이 표시됩니다. 본 분석은 투자 참고용이며 법적 책임은 지지 않습니다.")
+            embed.set_footer(text="※ 차트 X축은 월.일입니다. 본 AI 패턴 분석은 과거 데이터(볼린저 밴드, RSI, 거래량)를 통한 통계적 시뮬레이션이며 투자 결과에 법적 책임을 지지 않습니다.")
 
             if info.get('chart_buf'):
                 file = discord.File(info['chart_buf'], filename="chart.png")
