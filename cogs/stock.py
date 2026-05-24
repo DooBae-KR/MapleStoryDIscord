@@ -13,20 +13,16 @@ class Stock(commands.Cog):
         if currency == "USD": return f"{price:,.2f}"
         return f"{int(price):,}"
 
-    # --- 실시간 자동완성 (UX/UI 최적화) ---
-    @app_commands.command(name="주가", description="종목 상세 분석 (차트, 52주 변동, 자본 흐름, 수혜주 포함)")
+    @app_commands.command(name="주가", description="종목 상세 분석 (차트, 52주 변동, 매수/매도 타이밍, 수혜주 포함)")
     @app_commands.describe(keyword="종목명(대건, lg 등) 또는 티커를 검색하세요")
     async def get_price(self, interaction: discord.Interaction, keyword: str):
         await interaction.response.defer(thinking=True)
         
-        # 만약 사용자가 자동완성을 클릭해서 정확한 티커가 넘어왔거나, 직접 쳤는데 티커라면?
-        # search_stock 로 한 번 더 안전하게 찾습니다.
         search_results = search_stock(keyword)
         if not search_results:
             return await interaction.followup.send(f"❌ '{keyword}' 검색 결과를 찾을 수 없습니다.")
             
         best_match = search_results[0]
-        # 자동완성을 거쳤으므로 코스닥/코스피 구분이 정확한 symbol이 넘어갑니다.
         info = get_stock_info(best_match['symbol'], best_match['name'])
         
         if info:
@@ -43,26 +39,34 @@ class Stock(commands.Cog):
                 color=0x2b2d31
             )
             
-            embed.add_field(name="💰 현재가", value=f"**`{price_str} {curr}`**", inline=True)
-            embed.add_field(name="시가", value=f"{open_str} {curr}", inline=True)
-            embed.add_field(name="전일 종가", value=f"{prev_str} {curr}", inline=True)
-            
-            embed.add_field(name="📊 52주 최저~최고", value=f"{low_str} ~ {high_str} {curr}", inline=True)
-            embed.add_field(name="🚀 52주 저점 대비 성장", value=f"**{growth_str}**", inline=True)
-            embed.add_field(name="📈 동종 업계 상대지표", value=f"*{info['relative_strength']}*", inline=True)
+            # --- 가독성을 높인 직사각형 블록형 데이터 배치 ---
+            embed.add_field(
+                name="[ 💵 주가 및 시세 정보 ]",
+                value=f"```yaml\n현재가   : {price_str} {curr}\n시가     : {open_str} {curr}\n전일종가 : {prev_str} {curr}```",
+                inline=False
+            )
 
             embed.add_field(
-                name="🤖 AI 퀀트 종합 투자 점수", 
-                value=f"**{info['score']}점** / 100점\n*(자본 수급, 기관 매수세, 애널리스트 미래가치 평가 종합)*", 
+                name="[ 📊 52주 변동 및 성장률 ]",
+                value=f"```yaml\n최저~최고 : {low_str} ~ {high_str} {curr}\n성장률    : {growth_str}\n동종업계  : {info['relative_strength']}```",
                 inline=False
             )
+
             embed.add_field(
-                name="🔗 관련 수혜주 / 밸류체인", 
-                value=f"`{info['related_tickers']}`\n*(해당 종목과 동조화되거나 자금이 같이 움직이는 종목들)*", 
+                name="[ 🎯 AI 퀀트 투자 분석 및 매수/매도 타이밍 ]", 
+                value=f"> **종합 점수**: **{info['score']}점** / 100점\n"
+                      f"> {info['signal_icon']} **{info['trading_signal']}**\n"
+                      f"*(외인/기관 자본 흐름, 이동평균선 역배열/정배열, 기술적 RSI 지표 등을 종합한 분석입니다.)*", 
+                inline=False
+            )
+
+            embed.add_field(
+                name="[ 🔗 관련 수혜 기업 및 밸류체인 ]", 
+                value=f"> {info['related_tickers']}", 
                 inline=False
             )
             
-            embed.set_footer(text="※ 차트는 최근 3개월 추세입니다. 점수는 거래량 폭발(자본유입), 모멘텀, 가치평가를 기반으로 합니다.")
+            embed.set_footer(text="※ 차트 하단에는 X축(월.일)이 표시됩니다. 본 분석은 투자 참고용이며 법적 책임은 지지 않습니다.")
 
             if info.get('chart_buf'):
                 file = discord.File(info['chart_buf'], filename="chart.png")
@@ -77,16 +81,12 @@ class Stock(commands.Cog):
     async def keyword_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
         if not current:
             return []
-        
-        # 타이핑 할 때마다 실시간으로 네이버에 물어봐서 드롭다운으로 보여줍니다.
         results = search_stock(current)
         choices = []
         for r in results:
-            # 예: "LG전자 (066570)"
             display_name = f"{r['name']} ({r['display_symbol']})"
             choices.append(app_commands.Choice(name=display_name, value=r['symbol']))
-            
-        return choices[:25] # 디스코드 제한은 최대 25개
+        return choices[:25]
 
 async def setup(bot):
     await bot.add_cog(Stock(bot))
