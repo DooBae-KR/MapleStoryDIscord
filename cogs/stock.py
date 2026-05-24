@@ -2,6 +2,8 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from utils.fetcher import get_stock_info, search_stock, get_recommended_stocks
+from utils.db import toggle_favorite, get_favorites
+import asyncio
 from typing import List
 
 MARKET_ALIASES = {
@@ -9,6 +11,27 @@ MARKET_ALIASES = {
     "KOSDAQ": ["코스닥", "ㅋㅅㄷ", "kosdaq", "코스닥 (KOSDAQ)"],
     "US": ["나스닥", "미국", "미국주식", "미장", "ㄴㅅㄷ", "ㅁㅈ", "us", "nasdaq", "나스닥/미국주식 (US)"]
 }
+
+class FavoriteButton(discord.ui.Button):
+    def __init__(self, ticker: str, name: str):
+        super().__init__(style=discord.ButtonStyle.secondary, label="즐겨찾기", emoji="👍")
+        self.ticker = ticker
+        self.name = name
+
+    async def callback(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        # DB에 추가 또는 제거 (토글)
+        added = toggle_favorite(user_id, self.ticker, self.name)
+        
+        if added:
+            await interaction.response.send_message(f"👍 **{self.name}** 종목이 내 즐겨찾기에 추가되었습니다!\n(`/ㄴㅈㅁ` 명령어로 모아볼 수 있습니다)", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"🗑️ **{self.name}** 종목이 즐겨찾기에서 제거되었습니다.", ephemeral=True)
+
+class StockView(discord.ui.View):
+    def __init__(self, ticker: str, name: str):
+        super().__init__(timeout=None)
+        self.add_item(FavoriteButton(ticker, name))
 
 class Stock(commands.Cog):
     def __init__(self, bot):
@@ -80,14 +103,17 @@ class Stock(commands.Cog):
                 inline=False
             )
             
-            embed.set_footer(text="※ 차트 X축은 월.일입니다. 본 AI 패턴 분석은 과거 데이터(볼린저 밴드, RSI, 거래량)를 통한 통계적 시뮬레이션이며 투자 결과에 법적 책임을 지지 않습니다.")
+            embed.set_footer(text="※ 아래 👍버튼을 누르면 내 즐겨찾기에 추가되어 /ㄴㅈㅁ 로 확인할 수 있습니다.")
+
+            # 즐겨찾기 버튼이 포함된 View 생성
+            view = StockView(ticker=best_match['symbol'], name=info['name'])
 
             if info.get('chart_buf'):
                 file = discord.File(info['chart_buf'], filename="chart.png")
                 embed.set_image(url="attachment://chart.png")
-                await interaction.followup.send(file=file, embed=embed)
+                await interaction.followup.send(file=file, embed=embed, view=view)
             else:
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(embed=embed, view=view)
         else:
             await interaction.followup.send("❌ 상세 데이터를 불러오는데 실패했습니다.")
 
@@ -101,13 +127,11 @@ class Stock(commands.Cog):
             choices.append(app_commands.Choice(name=display_name, value=r['symbol']))
         return choices[:25]
 
-    # --- 종목 추천 명령어 ---
     @app_commands.command(name="추천", description="AI 알고리즘이 매수하기 좋은 유망 종목을 추천합니다.")
     @app_commands.describe(market="검색할 장종류 (코스피/ㅋㅅㅍ, 코스닥/ㅋㅅㄷ, 나스닥/ㄴㅅㄷ 등)")
     async def recommend(self, interaction: discord.Interaction, market: str):
         await interaction.response.defer(thinking=True)
         
-        # 초성 및 줄임말 매핑 로직
         market_val = None
         market_lower = market.lower().replace(" ", "")
         for std, aliases in MARKET_ALIASES.items():
@@ -156,8 +180,7 @@ class Stock(commands.Cog):
             app_commands.Choice(name="코스닥 (KOSDAQ)", value="KOSDAQ"),
             app_commands.Choice(name="나스닥/미국주식 (US)", value="US")
         ]
-        if not current:
-            return choices
+        if not current: return choices
             
         current_lower = current.lower()
         filtered = []
@@ -166,9 +189,66 @@ class Stock(commands.Cog):
             aliases = MARKET_ALIASES[val]
             if any(current_lower in alias for alias in aliases):
                 filtered.append(choice)
-                
-        # 매칭되는게 없으면 전체 리스트를 보여줌
         return filtered if filtered else choices
+
+    # --- 내 종목 모아보기 명령어 ---
+    @app_commands.command(name="ㄴㅈㅁ", description="내가 즐겨찾기(👍)한 종목들의 현재 상태와 매매 전략(물타기/존버 등)을 확인합니다.")
+    async def my_portfolio(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        
+        user_id = str(interaction.user.id)
+        favs = get_favorites(user_id)
+        
+        if not favs:
+            return await interaction.followup.send("❌ 아직 즐겨찾기한 종목이 없습니다. `/주가` 검색 후 하단의 👍 버튼을 눌러 추가해보세요!")
+            
+        embed = discord.Embed(
+            title=f"📁 {interaction.user.display_name}님의 관심 종목 포트폴리오",
+            description=f"총 {len(favs)}개의 종목을 AI가 일괄 분석했습니다.",
+            color=0xffd700
+        )
+        
+        # 디스코드 타임아웃을 피하기 위해 asyncio를 사용하여 병렬로 데이터 수집
+        async def fetch_fav(fav):
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(None, get_stock_info, fav['ticker'], fav['name'])
+            return info
+
+        tasks = [fetch_fav(f) for f in favs[:10]] # 최대 10개 제한 (응답속도 및 봇 부하 방지)
+        results = await asyncio.gather(*tasks)
+        
+        for info in results:
+            if not info: continue
+            
+            # AI 분석 시그널을 바탕으로 물타기/추매/존버 판단 로직
+            signal = info['trading_signal']
+            icon = info['signal_icon']
+            
+            strategy = ""
+            if "강력 매수" in signal:
+                strategy = "🚨 **물타기 / 신규진입 강력 추천** (RSI 과매도 바닥 구간)"
+            elif "단기 추세 매수" in signal:
+                strategy = "🔥 **불타기(추매) 가능** (거래량 동반 우상향, 자금 유입중)"
+            elif "눌림목 매수" in signal:
+                strategy = "📉 **비중 확대 및 물타기 추천** (단기 조정 중인 가성비 구간)"
+            elif "강력 매도" in signal:
+                strategy = "💰 **익절 고려 / 물타기 절대 금지** (과열 구간 진입)"
+            elif "관망 (데드" in signal:
+                strategy = "🥶 **물타기 금지 / 바닥 확인 전까지 존버 요망** (하락 추세 진행중)"
+            else:
+                strategy = "🧘 **존버 / 관망** (뚜렷한 방향성 없음, 지지선 대기)"
+
+            price_str = self.format_price(info['price'], info['currency'])
+            val_text = f"**현재가**: `{price_str} {info['currency']}` | **AI 점수**: `{info['score']}점`\n> {icon} {strategy}"
+            
+            embed.add_field(name=f"{info['icon']} {info['name']} ({info['ticker']})", value=val_text, inline=False)
+            
+        if len(favs) > 10:
+            embed.set_footer(text="※ 서버 부하를 막기 위해 상위 10개 종목만 분석되었습니다. 종목 관리는 다시 /주가 검색 후 👍를 눌러 취소할 수 있습니다.")
+        else:
+            embed.set_footer(text="※ 본 매매 가이드는 기술적 지표 시뮬레이션 결과이므로 투자 참고용으로만 활용하세요.")
+            
+        await interaction.followup.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(Stock(bot))
